@@ -25,8 +25,9 @@ namespace TMKOC.Games.TilingGame
             // Calculate a random point inside the camera view
             Vector2 spawnPos = GetRandomViewportPosition();
 
-            // Instantiate
-            Piece newPiece = Instantiate(piecePrefab, spawnPos, Quaternion.identity);
+            // Instantiate with strict Z-only rotation (0 for X and Y)
+            float spawnZ = 0f; // Can be randomized later, but must be a multiple of 30
+            Piece newPiece = Instantiate(piecePrefab, spawnPos, Quaternion.Euler(0f, 0f, spawnZ));
             
             // Keep the hierarchy clean
             newPiece.transform.SetParent(this.transform);

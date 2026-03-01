@@ -156,13 +156,11 @@ namespace TMKOC.Games.TilingGame
                 {
                     result.hasGap = true;
                     result.gapArea = area;
-                    Debug.Log($"[GapDetector] Enclosed gap detected! Area: {area:F3} (threshold: {gapAreaThreshold:F3})");
                 }
                 else if (area > gapAreaThreshold * 0.5f)
                 {
                     // Nearly enclosed — warn but don't trigger game over
                     result.hasNearlyEnclosedGap = true;
-                    Debug.Log($"[GapDetector] Nearly enclosed gap detected. Area: {area:F3}");
                 }
             }
 

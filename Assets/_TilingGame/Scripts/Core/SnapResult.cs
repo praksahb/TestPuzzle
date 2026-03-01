@@ -20,6 +20,12 @@ namespace TMKOC.Games.TilingGame
         public List<EdgeSlotRegistry.EdgeSlot> closedSlots;
 
         /// <summary>
+        /// Vertices at candidate pose, already computed and exact.
+        /// Eliminates the need to wait for Unity transform syncs.
+        /// </summary>
+        public Vector2[] projectedVertices;
+
+        /// <summary>
         /// If success is false, this explains why.
         /// Only populated when SnapConfig.emitRejectionEvents is true.
         /// </summary>

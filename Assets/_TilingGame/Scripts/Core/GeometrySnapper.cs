@@ -3,19 +3,6 @@ using System.Collections.Generic;
 
 namespace TMKOC.Games.TilingGame
 {
-    /// <summary>
-    /// Geometry utility for the snap pipeline.
-    /// Now works WITH the EdgeSlotRegistry instead of independently scanning edges.
-    ///
-    /// Design Doc Reference: Sections 5, 6, 7.1 (ComputeBestSnapRotation)
-    ///
-    /// CHANGES from v1:
-    /// - TrySnap() now queries the EdgeSlotRegistry as primary filter
-    /// - Broken vertex loop fixed (vertices fully built before sweep)
-    /// - ComputeExpectedNeighbours() excludes flush neighbours from geometry sweep
-    /// - ConfirmNoBodyIntrusion() reads CanonicalVertexStore, not transforms
-    /// - ComputeBestSnapRotation() added for Forgiving mode auto-rotate
-    /// </summary>
     public static class GeometrySnapper
     {
         public struct Edge
@@ -26,14 +13,6 @@ namespace TMKOC.Games.TilingGame
             public int index;
         }
 
-        // ─────────────────────────────────────────────
-        //  Edge Extraction
-        // ─────────────────────────────────────────────
-
-        /// <summary>
-        /// Gets world-space edges from a piece's edgeSockets (live transform).
-        /// Used ONLY for the currently-dragged piece.
-        /// </summary>
         public static Edge[] GetWorldEdges(Piece piece)
         {
             if (piece.edgeSockets == null || piece.edgeSockets.Length < 3)
@@ -47,8 +26,11 @@ namespace TMKOC.Games.TilingGame
 
             for (int i = 0; i < count; i++)
             {
-                Transform t1 = piece.edgeSockets[i];
-                Transform t2 = piece.edgeSockets[(i + 1) % count];
+                int idx1 = i;
+                int idx2 = (i + 1) % count;
+
+                Transform t1 = piece.edgeSockets[idx1];
+                Transform t2 = piece.edgeSockets[idx2];
 
                 if (t1 == null || t2 == null) continue;
 
@@ -66,10 +48,6 @@ namespace TMKOC.Games.TilingGame
             return edges;
         }
 
-        /// <summary>
-        /// Gets edges from canonical (frozen) vertex positions.
-        /// Used for all pieces already in the cluster. Eliminates transform drift.
-        /// </summary>
         public static Edge[] GetCanonicalEdges(Vector2[] canonicalVerts)
         {
             if (canonicalVerts == null || canonicalVerts.Length < 3)
@@ -94,14 +72,6 @@ namespace TMKOC.Games.TilingGame
             return edges;
         }
 
-        // ─────────────────────────────────────────────
-        //  Main Snap Pipeline (Design Doc Section 10.1 / 10.2)
-        // ─────────────────────────────────────────────
-
-        /// <summary>
-        /// Attempts to snap a dragged piece into the cluster using the Edge Slot Registry.
-        /// Returns a SnapResult with success/failure and the target pose.
-        /// </summary>
         public static SnapResult TrySnap(Piece dragged, EdgeSlotRegistry registry, SnapConfig config)
         {
             SnapResult result = new SnapResult
@@ -116,8 +86,6 @@ namespace TMKOC.Games.TilingGame
             Edge[] draggedEdges = GetWorldEdges(dragged);
             if (draggedEdges.Length == 0) return result;
 
-            // ── Phase 1: Find the best matching open slot ──
-            // Try each edge of the dragged piece against all OPEN slots
             EdgeSlotRegistry.EdgeSlot primarySlot = null;
             Edge bestDraggedEdge = default;
             float bestScore = config.snapDistanceThreshold;
@@ -127,7 +95,6 @@ namespace TMKOC.Games.TilingGame
                 var candidate = registry.FindBestMatchingOpenSlot(dEdge, config.snapDistanceThreshold);
                 if (candidate != null)
                 {
-                    // Compute score for this candidate
                     Vector2 dragMid = (dEdge.p1 + dEdge.p2) * 0.5f;
                     Vector2 slotMid = (candidate.p1 + candidate.p2) * 0.5f;
                     float score = Vector2.Distance(dragMid, slotMid);
@@ -147,12 +114,10 @@ namespace TMKOC.Games.TilingGame
                 return result;
             }
 
-            // ── Phase 2: Compute candidate pose ──
             Vector2 potentialPos;
             Quaternion potentialRot;
             ComputeCandidatePose(dragged, bestDraggedEdge, primarySlot, out potentialPos, out potentialRot);
 
-            // ── Phase 2b: Angular tolerance check (Strict mode) ──
             if (!config.autoRotate)
             {
                 Vector2 dragDir = (bestDraggedEdge.p2 - bestDraggedEdge.p1).normalized;
@@ -166,33 +131,25 @@ namespace TMKOC.Games.TilingGame
                 }
             }
 
-            // ── Phase 3: Project all edges at candidate pose ──
             Edge[] projectedEdges = ProjectEdgesAtPose(dragged, draggedEdges, potentialPos, potentialRot);
+            List<EdgeSlotRegistry.EdgeSlot> matchedSlots = registry.FindAllMatchingOpenSlots(projectedEdges, config.snapDistanceThreshold);
 
-            // ── Phase 4: Find ALL matching open slots (for neighbour detection) ──
-            List<EdgeSlotRegistry.EdgeSlot> matchedSlots =
-                registry.FindAllMatchingOpenSlots(projectedEdges, config.snapDistanceThreshold);
-
-            // Build expected neighbours set
             HashSet<Piece> expectedNeighbours = new HashSet<Piece>();
             HashSet<Vector2> sharedVertices = new HashSet<Vector2>();
 
             foreach (var slot in matchedSlots)
             {
                 expectedNeighbours.Add(slot.ownerPiece);
-                // Add slot endpoints as shared vertices
                 AddRoundedVertex(sharedVertices, slot.p1);
                 AddRoundedVertex(sharedVertices, slot.p2);
             }
 
-            // Also add our own projected endpoints at matched edges
             foreach (var pEdge in projectedEdges)
             {
                 AddRoundedVertex(sharedVertices, pEdge.p1);
                 AddRoundedVertex(sharedVertices, pEdge.p2);
             }
 
-            // ── Phase 5: Geometry confirmation (Section 6) ──
             Vector2[] projectedVerts = ProjectVerticesAtPose(dragged, draggedEdges, potentialPos, potentialRot);
 
             if (!ConfirmNoBodyIntrusion(projectedVerts, dragged, registry, expectedNeighbours, sharedVertices))
@@ -201,26 +158,16 @@ namespace TMKOC.Games.TilingGame
                 return result;
             }
 
-            // ── SUCCESS ──
             result.success = true;
             result.targetPos = potentialPos;
             result.targetRot = potentialRot;
             result.closedSlots = matchedSlots;
+            result.projectedVertices = projectedVerts; // Already exact, avoids transform drift issues
 
             return result;
         }
 
-        // ─────────────────────────────────────────────
-        //  Candidate Pose Computation
-        // ─────────────────────────────────────────────
-
-        /// <summary>
-        /// Computes where the piece needs to be positioned and rotated
-        /// so that the dragged edge aligns anti-parallel with the slot edge.
-        /// </summary>
-        public static void ComputeCandidatePose(Piece dragged, Edge draggedEdge,
-            EdgeSlotRegistry.EdgeSlot slot,
-            out Vector2 potentialPos, out Quaternion potentialRot)
+        public static void ComputeCandidatePose(Piece dragged, Edge draggedEdge, EdgeSlotRegistry.EdgeSlot slot, out Vector2 potentialPos, out Quaternion potentialRot)
         {
             Vector2 dragEdgeDir = (draggedEdge.p2 - draggedEdge.p1).normalized;
             Vector2 slotEdgeDir = (slot.p1 - slot.p2).normalized; // Anti-parallel
@@ -228,22 +175,31 @@ namespace TMKOC.Games.TilingGame
             float deltaAngle = Vector2.SignedAngle(dragEdgeDir, slotEdgeDir);
             potentialRot = Quaternion.Euler(0, 0, deltaAngle) * dragged.transform.rotation;
 
-            // Map draggedEdge.p1 → slot.p2 after rotation
+            // --- BUG FIX: Floating Point Rotation Drift ---
+            float rawZ = potentialRot.eulerAngles.z;
+            float snappedZ = Mathf.Round(rawZ / 30f) * 30f;
+            
+            potentialRot = Quaternion.Euler(0f, 0f, snappedZ);
+
+            // Use the actual clamped rotation to calculate translation
+            Quaternion actualDeltaRot = potentialRot * Quaternion.Inverse(dragged.transform.rotation);
+            
             Vector2 rootToP1 = draggedEdge.p1 - (Vector2)dragged.transform.position;
-            Vector2 rotatedRootToP1 = Quaternion.Euler(0, 0, deltaAngle) * rootToP1;
-            potentialPos = slot.p2 - rotatedRootToP1;
+            Vector2 rootToP2 = draggedEdge.p2 - (Vector2)dragged.transform.position;
+
+            Vector2 rotatedP1 = (Vector2)(actualDeltaRot * rootToP1);
+            Vector2 rotatedP2 = (Vector2)(actualDeltaRot * rootToP2);
+
+            Vector2 candidateA = slot.p2 - rotatedP1; // p1 maps to slot.p2
+            Vector2 candidateB = slot.p1 - rotatedP2; // p2 maps to slot.p1
+
+            float distA = Vector2.Distance(candidateA, (Vector2)dragged.transform.position);
+            float distB = Vector2.Distance(candidateB, (Vector2)dragged.transform.position);
+
+            potentialPos = distA < distB ? candidateA : candidateB;
         }
 
-        // ─────────────────────────────────────────────
-        //  Edge & Vertex Projection
-        // ─────────────────────────────────────────────
-
-        /// <summary>
-        /// Projects all edges of the dragged piece to where they WOULD be
-        /// at the candidate pose, without actually moving the piece.
-        /// </summary>
-        private static Edge[] ProjectEdgesAtPose(Piece dragged, Edge[] currentEdges,
-            Vector2 candidatePos, Quaternion candidateRot)
+        private static Edge[] ProjectEdgesAtPose(Piece dragged, Edge[] currentEdges, Vector2 candidatePos, Quaternion candidateRot)
         {
             Quaternion currentRot = dragged.transform.rotation;
             Quaternion deltaRot = candidateRot * Quaternion.Inverse(currentRot);
@@ -268,46 +224,37 @@ namespace TMKOC.Games.TilingGame
             return projected;
         }
 
-        /// <summary>
-        /// Projects all vertices (edge start-points) to their candidate pose positions.
-        /// Returns a COMPLETE array — fixing the broken loop bug from Section 2.2.
-        /// </summary>
-        private static Vector2[] ProjectVerticesAtPose(Piece dragged, Edge[] currentEdges,
-            Vector2 candidatePos, Quaternion candidateRot)
+        private static Vector2[] ProjectVerticesAtPose(Piece dragged, Edge[] currentEdges, Vector2 candidatePos, Quaternion candidateRot)
         {
             Quaternion currentRot = dragged.transform.rotation;
             Quaternion deltaRot = candidateRot * Quaternion.Inverse(currentRot);
 
-            // BUILD THE ENTIRE ARRAY FIRST (Design Doc Section 2.2 fix)
+            // Constraint 1 Fix #2.2: Build the entire complete array before any testing occurs.
+            // The method signature returns Vector2[] with no side effects, making it structurally robust.
             Vector2[] verts = new Vector2[currentEdges.Length];
             for (int i = 0; i < currentEdges.Length; i++)
             {
                 Vector2 localOffset = currentEdges[i].p1 - (Vector2)dragged.transform.position;
                 verts[i] = candidatePos + (Vector2)(deltaRot * localOffset);
             }
+            
+            for (int i = 0; i < verts.Length; i++)
+            {
+                verts[i] = new Vector2(
+                    Mathf.Round(verts[i].x * 1000f) / 1000f,
+                    Mathf.Round(verts[i].y * 1000f) / 1000f
+                );
+            }
             return verts;
         }
 
-        // ─────────────────────────────────────────────
-        //  Geometry Confirmation (Section 6.2)
-        // ─────────────────────────────────────────────
-
-        /// <summary>
-        /// Checks that the incoming piece at its candidate pose does NOT intrude
-        /// into any piece that is NOT an expected neighbour.
-        /// Shared vertices are excluded from the point-in-polygon test.
-        /// </summary>
-        private static bool ConfirmNoBodyIntrusion(Vector2[] draggedVertices, Piece dragged,
-            EdgeSlotRegistry registry,
-            HashSet<Piece> expectedNeighbours, HashSet<Vector2> sharedVertices)
+        private static bool ConfirmNoBodyIntrusion(Vector2[] draggedVertices, Piece dragged, EdgeSlotRegistry registry, HashSet<Piece> expectedNeighbours, HashSet<Vector2> sharedVertices)
         {
-            // Step 1: Compute centroid from the COMPLETE vertex array
             Vector2 draggedCentroid = Vector2.zero;
             for (int i = 0; i < draggedVertices.Length; i++)
                 draggedCentroid += draggedVertices[i];
             draggedCentroid /= draggedVertices.Length;
 
-            // Step 2: Build test vertices = all vertices MINUS shared ones
             List<Vector2> testVertices = new List<Vector2>();
             for (int i = 0; i < draggedVertices.Length; i++)
             {
@@ -315,19 +262,18 @@ namespace TMKOC.Games.TilingGame
                     testVertices.Add(draggedVertices[i]);
             }
 
-            // Step 3: Shrink toward centroid for epsilon clearance
             Vector2[] shrunkenDragged = ShrinkVertices(testVertices.ToArray(), draggedCentroid, 0.85f);
 
-            // Step 4: Test against all non-neighbour cluster pieces
             foreach (var kvp in registry.canonicalVertices)
             {
                 Piece otherPiece = kvp.Key;
                 if (otherPiece == dragged) continue;
-                if (expectedNeighbours.Contains(otherPiece)) continue; // KEY CHANGE from Section 5
+                if (expectedNeighbours.Contains(otherPiece)) continue;
 
-                Vector2[] otherVerts = kvp.Value;
+                // Constraint 2: Read canonical vertices ONLY from registry.canonicalVertices, NEVER piece.transform.
+                // Do not modify this lookup logic.
+                Vector2[] otherVerts = kvp.Value; 
 
-                // Check A: Do any of our shrunken vertices land inside otherPiece?
                 for (int v = 0; v < shrunkenDragged.Length; v++)
                 {
                     if (IsPointInPolygon(shrunkenDragged[v], otherVerts))
@@ -337,7 +283,6 @@ namespace TMKOC.Games.TilingGame
                     }
                 }
 
-                // Check B: Do any of otherPiece's shrunken vertices land inside us?
                 Vector2 otherCentroid = Vector2.zero;
                 for (int i = 0; i < otherVerts.Length; i++)
                     otherCentroid += otherVerts[i];
@@ -358,18 +303,13 @@ namespace TMKOC.Games.TilingGame
             return true;
         }
 
-        // ─────────────────────────────────────────────
-        //  Forgiving Mode: Auto-Rotate (Section 7.1)
-        // ─────────────────────────────────────────────
-
-        /// <summary>
-        /// Finds the nearest valid orientation for the dragged piece by scanning
-        /// all OPEN slots in proximity. Rotates the piece to best-align before
-        /// the snap search begins.
-        /// Only called in Forgiving mode (config.autoRotate == true).
-        /// </summary>
         public static void ComputeBestSnapRotation(Piece dragged, EdgeSlotRegistry registry, SnapConfig config)
         {
+            float zAngle = dragged.transform.eulerAngles.z;
+            float snappedZ = Mathf.Round(zAngle / 30f) * 30f;
+            dragged.transform.rotation = Quaternion.Euler(0f, 0f, snappedZ);
+            Physics2D.SyncTransforms(); // force child sockets to update before edge scanning
+
             Edge[] draggedEdges = GetWorldEdges(dragged);
             if (draggedEdges.Length == 0) return;
 
@@ -385,14 +325,11 @@ namespace TMKOC.Games.TilingGame
 
                 foreach (var dEdge in draggedEdges)
                 {
-                    // Length compatibility
                     if (Mathf.Abs(slot.key.length - dEdge.length) > 0.05f) continue;
 
-                    // Rough proximity check
                     Vector2 dragMid = (dEdge.p1 + dEdge.p2) * 0.5f;
                     if (Vector2.Distance(slotMid, dragMid) > searchRadius) continue;
 
-                    // Compute angular delta
                     Vector2 dragDir = (dEdge.p2 - dEdge.p1).normalized;
                     Vector2 slotDirReversed = (slot.p1 - slot.p2).normalized;
                     float deltaAngle = Vector2.SignedAngle(dragDir, slotDirReversed);
@@ -406,16 +343,16 @@ namespace TMKOC.Games.TilingGame
                 }
             }
 
-            // Apply the best rotation if we found one
             if (bestAngleDelta < float.MaxValue)
             {
                 dragged.transform.rotation = Quaternion.Euler(0, 0, bestDelta) * dragged.transform.rotation;
+                
+                float rawZBest = dragged.transform.eulerAngles.z;
+                float snappedZBest = Mathf.Round(rawZBest / 30f) * 30f;
+                
+                dragged.transform.rotation = Quaternion.Euler(0f, 0f, snappedZBest);
             }
         }
-
-        // ─────────────────────────────────────────────
-        //  Utilities
-        // ─────────────────────────────────────────────
 
         private static Vector2[] ShrinkVertices(Vector2[] vertices, Vector2 centroid, float scaleFactor)
         {
@@ -446,9 +383,6 @@ namespace TMKOC.Games.TilingGame
             set.Add(rounded);
         }
 
-        /// <summary>
-        /// Ray-casting point-in-polygon test. Unchanged from v1.
-        /// </summary>
         public static bool IsPointInPolygon(Vector2 point, Vector2[] polygon)
         {
             bool isInside = false;

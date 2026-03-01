@@ -7,7 +7,6 @@ namespace TMKOC.Games.TilingGame
     public class Piece : MonoBehaviour
     {
         [Header("Piece Definition")]
-        public bool isMirrored = false;
         
         // Degrees to rotate when the player clicks the piece manually
         [Tooltip("Degrees to rotate when the player clicks the piece manually")]
@@ -70,7 +69,7 @@ namespace TMKOC.Games.TilingGame
                 // Add a very slight constant spin
                 rb.angularVelocity = 15f; 
             }
-            else if (rb != null)
+            else if (rb != null && rb.bodyType != RigidbodyType2D.Static)
             {
                 // If it's being dragged, or has snapped into the grid, stop its physical drift entirely
                 rb.linearVelocity = Vector2.zero;
@@ -121,38 +120,6 @@ namespace TMKOC.Games.TilingGame
                 return;
             }
             
-            if (visualTween != null) StopCoroutine(visualTween);
-            visualTween = StartCoroutine(SmoothRotate(targetRotation));
-        }
-
-        public void ToggleMirrorHorizontal()
-        {
-            // Flip the entire piece over the World Y axis (like turning a page in a book)
-            Quaternion yFlip = Quaternion.Euler(0, 180f, 0);
-            targetRotation = yFlip * targetRotation;
-
-            if (!Application.isPlaying || !gameObject.activeInHierarchy)
-            {
-                transform.rotation = targetRotation;
-                return;
-            }
-
-            if (visualTween != null) StopCoroutine(visualTween);
-            visualTween = StartCoroutine(SmoothRotate(targetRotation));
-        }
-
-        public void ToggleMirrorVertical()
-        {
-            // Flip the entire piece over the World X axis (like flipping a card top-to-bottom)
-            Quaternion xFlip = Quaternion.Euler(180f, 0, 0);
-            targetRotation = xFlip * targetRotation;
-
-            if (!Application.isPlaying || !gameObject.activeInHierarchy)
-            {
-                transform.rotation = targetRotation;
-                return;
-            }
-
             if (visualTween != null) StopCoroutine(visualTween);
             visualTween = StartCoroutine(SmoothRotate(targetRotation));
         }

@@ -526,7 +526,7 @@ SpriteRenderer:
   m_LightmapParameters: {fileID: 0}
   m_SortingLayerID: 0
   m_SortingLayer: 0
-  m_SortingOrder: 0
+  m_SortingOrder: 1
   m_Sprite: {fileID: 4660480494412202806, guid: 00a7ce8de42bf4b4390dbac1a156b830, type: 3}
   m_Color: {r: 1, g: 1, b: 1, a: 1}
   m_FlipX: 0
@@ -550,7 +550,6 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 4af7a02fba7383146b05bd7a6399f7d5, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  isMirrored: 0
   manualRotationStep: 30
   edgeSockets:
   - {fileID: 2538331881402068911}
@@ -607,7 +606,7 @@ PolygonCollider2D:
   m_SpriteTilingProperty:
     border: {x: 0, y: 0, z: 0, w: 0}
     pivot: {x: 0.5, y: 0.5}
-    oldSize: {x: 1.904, y: 1.384}
+    oldSize: {x: 1.9039999, y: 1.3858174}
     newSize: {x: 3.44, y: 4.17}
     adaptiveTilingThreshold: 0.5
     drawMode: 0

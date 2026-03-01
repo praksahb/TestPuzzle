@@ -13,7 +13,7 @@ MonoBehaviour:
   m_Name: ForgivingConfig
   m_EditorClassIdentifier: 
   mode: 0
-  snapDistanceThreshold: 0.6
+  snapDistanceThreshold: 0.4
   angularToleranceDegrees: 25
   autoRotate: 1
   autoCloseAdjacentEdges: 1

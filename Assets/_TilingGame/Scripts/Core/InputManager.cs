@@ -11,9 +11,17 @@ namespace TMKOC.Games.TilingGame
         [Header("Swipe Settings")]
         public float minSwipeDistance = 50f;
         
+        public static InputManager Instance { get; private set; }
+
+        private void Awake()
+        {
+            if (Instance == null) Instance = this;
+            else Destroy(gameObject);
+        }
+
         private Piece currentDraggedPiece;
         private Vector2 dragStartPos;
-        private bool isSwiping = false;
+        //private bool isSwiping = false;
 
         void Update()
         {
@@ -104,25 +112,12 @@ namespace TMKOC.Games.TilingGame
             {
                 Vector2 mouseDelta = (Vector2)Input.mousePosition - dragStartPos;
                 
-                // If they never triggered the movement phase AND covered the distance, it's a swipe!
-                if (!isCurrentlyDragging && mouseDelta.magnitude > minSwipeDistance)
-                {
-                    if (Mathf.Abs(mouseDelta.x) > Mathf.Abs(mouseDelta.y))
-                    {
-                        currentDraggedPiece.ToggleMirrorHorizontal();
-                    }
-                    else
-                    {
-                        currentDraggedPiece.ToggleMirrorVertical();
-                    }
-                }
-                // --- NEW: Tap-to-Rotate ---
-                // If they released quickly and didn't move the mouse much, it's a TAP.
-                else if (!isCurrentlyDragging && mouseDelta.magnitude <= minSwipeDistance)
+                // If they never triggered the movement phase, it's a TAP.
+                if (!isCurrentlyDragging)
                 {
                     currentDraggedPiece.RotateManual(1);
                 }
-                else if (isCurrentlyDragging)
+                else
                 {
                     // It was an intentional drag and drop. 
                     if (CoreCluster.Instance != null && currentDraggedPiece != null)
@@ -134,8 +129,11 @@ namespace TMKOC.Games.TilingGame
                         }
                         else
                         {
-                            // If it successfully snapped, lock its internal rotation target so it doesn't spin back!
-                            currentDraggedPiece.ForceSnapRotation(currentDraggedPiece.transform.rotation);
+                            // If it successfully snapped, preserve its EXACT final rotation!
+                            if (currentDraggedPiece != null)
+                            {
+                                currentDraggedPiece.ForceSnapRotation(currentDraggedPiece.transform.rotation);
+                            }
                         }
                     }
                 }
@@ -181,6 +179,15 @@ namespace TMKOC.Games.TilingGame
             {
                 Piece p = hit.GetComponentInParent<Piece>();
                 if (p != null) p.RotateManual(1);
+            }
+        }
+        public void SetEnabled(bool enabled)
+        {
+            this.enabled = enabled;
+            if (!enabled)
+            {
+                currentDraggedPiece = null;
+                isCurrentlyDragging = false;
             }
         }
     }

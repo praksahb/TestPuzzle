@@ -26,24 +26,16 @@ namespace TMKOC.Games.TilingGame
         [SerializeField, Tooltip("Optional: Strict config to switch to when difficulty ramps up.")]
         private SnapConfig strictConfig;
 
-        /// <summary>
-        /// The Edge Slot Registry — the "brain" of the new snap system.
-        /// Tracks every edge as OPEN or CLOSED. Replaces all physics-based occupancy checks.
-        /// </summary>
+        [Header("Hat Pattern Detection")]
+        [SerializeField] private bool enableHatDetection = false;
+
         public EdgeSlotRegistry Registry { get; private set; }
 
-        /// <summary>
-        /// Event fired when a snap is rejected (Strict mode only).
-        /// UI can subscribe to give the player feedback.
-        /// </summary>
         public System.Action<RejectionReason> OnSnapRejected;
 
-        /// <summary>
-        /// Event fired when a gap is detected after a snap.
-        /// </summary>
-        public System.Action<GapDetector.GapScanResult> OnGapDetected;
-
         public static CoreCluster Instance { get; private set; }
+
+        public List<Piece> corePieces = new List<Piece>();
 
         private void Awake()
         {
@@ -81,17 +73,9 @@ namespace TMKOC.Games.TilingGame
             }
         }
 
-        // ─────────────────────────────────────────────
-        //  Registry Bootstrap (Design Doc Section 4.4, Step 5)
-        // ─────────────────────────────────────────────
-
-        /// <summary>
-        /// Reads all pieces currently parented to this CoreCluster and bootstraps
-        /// the EdgeSlotRegistry. Shared edges → CLOSED, outer edges → OPEN.
-        /// Called once in Start() after InitializeCenterCluster() has placed pieces.
-        /// </summary>
         private void BootstrapRegistry()
         {
+            Physics2D.SyncTransforms(); // ensure all socket positions are current before reading
             List<Piece> initialPieces = new List<Piece>();
             foreach (Transform child in transform)
             {
@@ -105,17 +89,10 @@ namespace TMKOC.Games.TilingGame
                 return;
             }
 
+            corePieces.AddRange(initialPieces);
             Registry.BootstrapFromCluster(initialPieces);
         }
 
-        // ─────────────────────────────────────────────
-        //  Snap Pipeline (Design Doc Section 10.1 / 10.2)
-        // ─────────────────────────────────────────────
-
-        /// <summary>
-        /// New unified snap entry point. Called by InputManager when the player releases a piece.
-        /// Uses the EdgeSlotRegistry + GeometrySnapper pipeline.
-        /// </summary>
         public bool TryPlacePiece(Piece piece)
         {
             if (Registry == null)
@@ -124,69 +101,62 @@ namespace TMKOC.Games.TilingGame
                 return false;
             }
 
-            // If the cluster is empty, place the first piece and bootstrap from it
+            float zAngle = piece.transform.eulerAngles.z;
+            float snappedZ = Mathf.Round(zAngle / 30f) * 30f;
+            piece.transform.rotation = Quaternion.Euler(0f, 0f, snappedZ);
+            Physics2D.SyncTransforms(); // force child sockets to update before GetWorldEdges reads them
+
             if (Registry.TotalSlotCount == 0)
             {
-                piece.isFloating = false;
-                piece.transform.SetParent(this.transform);
-
-                // Register this first piece into the registry
-                Vector2[] firstVerts = EdgeSlotRegistry.GetCurrentWorldVertices(piece);
+                // Fix #1 order for the very first piece
+                Vector2[] firstVerts = EdgeSlotRegistry.GetCurrentWorldVertices(piece); // BEFORE SetParent
+                AddToCorePieces(piece);
                 Registry.RegisterPieceEdges(piece, firstVerts);
 
                 OnSnapSuccess(piece);
                 return true;
             }
 
-            // Get the active config (check for difficulty ramp)
             SnapConfig config = GetActiveConfig();
 
-            // Forgiving mode: auto-rotate piece to nearest valid orientation
             if (config.autoRotate)
             {
-                GeometrySnapper.ComputeBestSnapRotation(piece, Registry, config);
+                GeometrySnapper.ComputeBestSnapRotation(piece, Registry, config); 
             }
 
-            // Run the full snap pipeline
             SnapResult result = GeometrySnapper.TrySnap(piece, Registry, config);
 
             if (result.success)
             {
-                // Move piece to the locked position
+                // Fix #1: Apply pose, disable float, set parent, register exact computed edges. EXACT order.
                 piece.transform.position = result.targetPos;
                 piece.transform.rotation = result.targetRot;
-                piece.isFloating = false;
-                piece.transform.SetParent(this.transform);
+                
+                // Use exact vertices computed from the successful snap pose (prevents Unity transform sync delay issues)
+                Vector2[] canonicalVerts = result.projectedVertices;
+                
+                AddToCorePieces(piece);
+                
+                Registry.RegisterPieceEdges(piece, canonicalVerts); // pass already-captured exact verts
 
-                // Store canonical vertices (frozen at snap time, never modified)
-                Vector2[] canonicalVerts = EdgeSlotRegistry.GetCurrentWorldVertices(piece);
-                Registry.RegisterPieceEdges(piece, canonicalVerts);
+                // TODO: Strict mode extra slot-closure handling logic to be added or determined in integration
 
-                // In Forgiving mode, all matched slots are auto-closed by RegisterPieceEdges.
-                // In Strict mode, only close the primary slot (handled separately if needed).
-
-                // Colorize on snap
                 SpriteRenderer sr = piece.GetComponentInChildren<SpriteRenderer>();
                 if (sr != null)
                 {
                     sr.color = Random.ColorHSV(0f, 1f, 0.5f, 1f, 0.8f, 1f);
                 }
 
-                Debug.Log("[CoreCluster] Piece snapped via Edge Slot Registry!");
-
-                // Run gap detection
-                RunGapDetection();
-
                 OnSnapSuccess(piece);
                 return true;
             }
             else
             {
-                // Snap failed
+                // Fix #4: Always log the rejection reason, but only fire event if flag is true
+                // Debug.Log($"[CoreCluster] Snap rejected: {result.reason}");
                 if (config.emitRejectionEvents)
                 {
                     OnSnapRejected?.Invoke(result.reason);
-                    Debug.Log($"[CoreCluster] Snap rejected: {result.reason}");
                 }
                 return false;
             }
@@ -194,88 +164,55 @@ namespace TMKOC.Games.TilingGame
 
         private void OnSnapSuccess(Piece piece)
         {
-            // Tell GameManager to spawn next piece
+            // 1. RegisterPieceEdges is already done in TryPlacePiece before calling this.
+            
+            // 2. Gap detector
+            GapDetector.GapScanResult gapResult = GapDetector.Scan(Registry, 0.1f);
+            if (gapResult.hasGap) 
+            { 
+                 if (GameManager.Instance != null)
+                 {
+                     GameManager.Instance.TriggerGameOver(); 
+                 }
+            }
+
+            // 3. Hat pattern matcher
+            if (enableHatDetection)
+            {
+                HatMatchResult hatResult = HatPatternMatcher.TryFindHat(Registry, corePieces, piece);
+                 if (hatResult.success)
+                 {
+                      Debug.Log($"[CoreCluster] HIT! HAT PATTERN DETECTED around {piece.name}");
+                      if (GameManager.Instance != null) { GameManager.Instance.OnHatDetected(hatResult); }
+                 }
+            }
+
+            // 4. On piece placed
             if (GameManager.Instance != null)
             {
                 GameManager.Instance.OnPiecePlacedSuccessfully();
             }
 
+            // 5. Update Bounds
             UpdateCameraBounds();
         }
-
-        // ─────────────────────────────────────────────
-        //  Gap Detection (Design Doc Section 8)
-        // ─────────────────────────────────────────────
-
-        private void RunGapDetection()
-        {
-            // Compute gap area threshold: 50% of a single kite tile's area
-            // A rough estimate using the first piece's canonical vertices
-            float gapAreaThreshold = 0.1f; // Safe default
-
-            foreach (var kvp in Registry.canonicalVertices)
-            {
-                float area = ComputePolygonArea(kvp.Value);
-                if (area > 0)
-                {
-                    gapAreaThreshold = area * 0.5f;
-                    break;
-                }
-            }
-
-            GapDetector.GapScanResult gapResult = GapDetector.Scan(Registry, gapAreaThreshold);
-
-            if (gapResult.hasGap)
-            {
-                Debug.LogWarning($"[CoreCluster] GAP DETECTED! Area: {gapResult.gapArea:F3}");
-                OnGapDetected?.Invoke(gapResult);
-            }
-            else if (gapResult.hasNearlyEnclosedGap)
-            {
-                Debug.Log("[CoreCluster] Nearly enclosed gap detected — warning player.");
-            }
-        }
-
-        private float ComputePolygonArea(Vector2[] vertices)
-        {
-            if (vertices == null || vertices.Length < 3) return 0f;
-            float area = 0f;
-            for (int i = 0; i < vertices.Length; i++)
-            {
-                Vector2 current = vertices[i];
-                Vector2 next = vertices[(i + 1) % vertices.Length];
-                area += (current.x * next.y) - (next.x * current.y);
-            }
-            return Mathf.Abs(area) * 0.5f;
-        }
-
-        // ─────────────────────────────────────────────
-        //  Difficulty Ramp (Design Doc Section 7)
-        // ─────────────────────────────────────────────
 
         private SnapConfig GetActiveConfig()
         {
             if (activeConfig == null)
             {
-                Debug.LogWarning("[CoreCluster] No SnapConfig assigned! Using defaults.");
                 return ScriptableObject.CreateInstance<SnapConfig>();
             }
 
-            // Check if we should switch to strict mode based on piece count
             if (strictConfig != null &&
                 activeConfig.strictModeThreshold > 0 &&
                 transform.childCount >= activeConfig.strictModeThreshold)
             {
-                Debug.Log($"[CoreCluster] Difficulty ramp! Switching to Strict mode at {transform.childCount} pieces.");
                 return strictConfig;
             }
 
             return activeConfig;
         }
-
-        // ─────────────────────────────────────────────
-        //  Camera Zoom (Unchanged)
-        // ─────────────────────────────────────────────
 
         public void UpdateCameraBounds()
         {
@@ -315,19 +252,13 @@ namespace TMKOC.Games.TilingGame
             }
         }
 
-        // ─────────────────────────────────────────────
-        //  GridManager-Based Initialization (Kept Intact)
-        // ─────────────────────────────────────────────
-
         [ContextMenu("Generate Center Cluster")]
         private void InitializeCenterCluster()
         {
             if (gridManager == null || singleKitePrefab == null)
             {
-                // GridManager is optional now. If not assigned, we expect manual placement.
                 if (transform.childCount > 0)
                 {
-                    // Custom level design: lock existing children
                     foreach (Transform child in transform)
                     {
                         Piece p = child.GetComponent<Piece>();
@@ -336,14 +267,9 @@ namespace TMKOC.Games.TilingGame
                     UpdateCameraBounds();
                     return;
                 }
-
-                Debug.LogWarning("CoreCluster: No GridManager and no pre-placed pieces. " +
-                                 "Place at least one Piece as a child of CoreCluster in the scene.");
                 return;
             }
 
-            // If the level designer manually placed pieces under CoreCluster in the Editor,
-            // assume this is a custom level design and do not generate the giant spiral.
             if (transform.childCount > 0)
             {
                 foreach (Transform child in transform)
@@ -357,7 +283,6 @@ namespace TMKOC.Games.TilingGame
 
             ClearCenterCluster();
 
-            // Generate an outward expanding spiral of coordinates
             int spawnedCount = 0;
             int radius = 0;
 
@@ -376,7 +301,6 @@ namespace TMKOC.Games.TilingGame
                         for (int k = 0; k < 6; k++)
                         {
                             if (spawnedCount >= initialCenterKites) break;
-
                             GridManager.KiteCoord coord = new GridManager.KiteCoord(q, r, k);
                             SpawnStaticKite(coord, k);
                             spawnedCount++;
@@ -435,6 +359,47 @@ namespace TMKOC.Games.TilingGame
             {
                 gridManager.ClearGrid();
             }
+        }
+        public void SwitchToStrictConfig()
+        {
+            if (strictConfig != null)
+            {
+                activeConfig = strictConfig;
+                Debug.Log("[CoreCluster] Switched to Strict Configuration.");
+            }
+        }
+
+        public void RemoveFromCorePieces(Piece piece)
+        {
+            if (corePieces.Contains(piece))
+            {
+                corePieces.Remove(piece);
+            }
+        }
+
+        public void AddToCorePieces(Piece piece)
+        {
+            piece.transform.SetParent(this.transform);
+            piece.isFloating = false;
+            if (!corePieces.Contains(piece))
+            {
+                corePieces.Add(piece);
+            }
+        }
+
+        public float GetCorePieceRotation()
+        {
+            foreach (Transform child in transform)
+            {
+                Piece p = child.GetComponent<Piece>();
+                if (p != null && p.name == "Kite_1_PerfectCollider") // non-clone, original
+                {
+                    Debug.Log($"[CorePiece] Found original: {p.name} rot={p.transform.eulerAngles.z}");
+                    return p.transform.eulerAngles.z;
+                }
+            }
+            Debug.Log("[CorePiece] Fallback to corePieces[0]");
+            return corePieces.Count > 0 ? corePieces[0].transform.eulerAngles.z : 0f;
         }
     }
 }
