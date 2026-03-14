@@ -1,0 +1,458 @@
+TILING GAME
+Snap System, Hat Detection & Transition
+Agent Prompt Document — Version 4
+All decisions confirmed by project owner. Read every section before writing any code.
+0. How To Use This Document
+This document is a complete specification for implementing the V4 tiling game in Unity 2D. Read every section before writing any code. All architectural decisions are final. Do not deviate from the data structures, algorithms, or file structure described here without explicitly flagging it.
+⚠ Do not skip sections. The Hat detection section depends on the edge registry section. The transition section depends on both.
+0.1 Files To Rewrite Completely
+CoreCluster.cs
+GeometrySnapper.cs
+EdgeSlotRegistry.cs
+HatPatternMatcher.cs
+HatMatchResult.cs
+0.2 Files To Create
+SnapConfig.cs — ScriptableObject
+SnapResult.cs — struct
+GapDetector.cs — static class
+0.3 Files You Must Not Touch
+Piece.cs
+InputManager.cs
+GridManager.cs
+GameManager.cs
+PieceSpawner.cs
+0.4 Namespace
+All scripts use namespace: TMKOC.Games.TilingGame — apply to every file.
+0.5 What Changed From V3
+Area
+Change
+EdgeSlotRegistry
+Spatial hash (3x3 bucket search) replaces single-bucket dictionary. Threshold 0.03f. Proven working — carry forward exactly.
+Hat degree sequence
+Corrected to [4,3,3,2,2,2,1,1]. V3 used wrong sequence [2,3,2,2,2,2,3,2].
+Hat edge count guard
+NEW: Must verify exactly 9 closed internal edges before degree check. V3 had no such guard — caused false positives.
+Isomorphism check
+Must NOT be bypassed. V3 bypassed it causing false positives on non-Hat 8-kite shapes.
+Hat spawn rotation
+Formula is: degree4Kite.transform.eulerAngles.z + 30f. V3 used result.rotation directly which was wrong.
+Hat spawn position
+result.centroid is correct as-is. Confirmed across all 4 orientations.
+Hat spawn — mirroring
+NOT required for kite scene. Required for Hat tiling scene (V5).
+corePieces list
+Used directly in TryFindHat — no FindObjectsByType calls.
+1. Project Overview
+A Unity 2D mobile puzzle game where the player snaps kite-shaped polygon tiles onto a growing cluster. The cluster starts with a single pre-placed center kite. The player drags new kite pieces from floating spawn positions and drops them near the cluster boundary. If the edges align the piece snaps in.
+1.1 Game Phases
+Phase
+Description
+Kite Phase
+Player snaps kites. Forgiving snap mode. Hat detection runs silently on every snap.
+Hat Transition
+When 8 kites form a Hat topology, they are destroyed and replaced by a single Hat prefab at the correct position and rotation.
+Hat Phase
+Player snaps Hat pieces. Strict snap mode. Hat detection continues — future Hat formations from kites are still possible if mixed pieces exist.
+1.2 Win and Loss Conditions
+Loss: An enclosed gap (empty space fully surrounded by snapped pieces) forms anywhere in the cluster.
+Win: None — the game is infinite. Camera zooms out as the cluster grows.
+1.3 Center Piece
+The scene always starts with one pre-placed center kite at position (0,0,0). Its rotation is set in the Inspector before play. The center piece is always named 'Kite_1_PerfectCollider' (no Clone suffix). All snapped pieces are named 'Kite_1_PerfectCollider(Clone)'. This naming difference is used to identify the center piece reliably in code.
+2. Kite Geometry
+The kite is a quadrilateral with 4 vertices (P1, P2, P3, P4) and 4 edges. All geometry is read from socket child GameObjects on the prefab — never hardcoded.
+2.1 Confirmed Socket Positions (Local Space)
+NOTE: These are the mathematically exact values for Kite_1_PerfectCollider. The prefab must have these values set exactly.
+Socket
+Local Position
+P1 (left)
+(-0.9034899, 0.4742019, 0)
+P2 (top)
+(0.0000000, 1.0010011, 0)
+P3 (right)
+(0.9034899, 0.4742019, 0)
+P4 (bottom)
+(0.0000000, -1.0651590, 0)
+2.2 Edge Lengths
+Edge
+Length
+P1→P2 (short)
+1.045854
+P2→P3 (short)
+1.045854
+P3→P4 (long)
+1.784916
+P4→P1 (long)
+1.784916
+NOTE: Two distinct edge lengths exist. Short edges connect top vertices. Long edges connect bottom vertices. This asymmetry is used by EdgeSlotRegistry to prevent wrong-length matches.
+2.3 Floating Point Drift
+Unity's rotation matrix math compounds outward from the center piece. By the 7th–8th snapped piece, edge midpoint drift of up to 0.025 world units is observed. The spatial hash system in Section 4 handles this. Do not use Mathf.Approximately or Vector2 == for any edge comparison.
+3. Snap Modes
+3.1 Forgiving Mode (Kite Phase)
+Auto-rotates the dragged piece to the nearest valid 30° increment
+Auto-closes ALL flush edges on snap simultaneously
+Wider distance threshold: 0.35f world units
+Angular tolerance: 30 degrees
+Used during kite phase only
+3.2 Strict Mode (Hat Phase)
+No auto-rotate
+Only the primary matched edge closes on snap
+Tight distance threshold: 0.15f world units
+Angular tolerance: 15 degrees
+Activated after first Hat transition
+3.3 SnapConfig ScriptableObject
+SnapConfig : ScriptableObject
+  float snapDistanceThreshold
+  float angularToleranceDegrees
+  bool  autoRotate
+  bool  autoCloseAllFlushEdges
+  bool  emitRejectionEvents
+Create two assets: ForgivingConfig.asset and StrictConfig.asset with the values above.
+4. Edge Slot Registry
+4.1 Purpose
+The registry is the single source of truth for cluster topology. Every edge in the cluster is OPEN (boundary, free to snap to) or CLOSED (shared between two pieces). All snap decisions go through the registry first.
+4.2 Spatial Hash Implementation
+⚠ Do not revert to a single-bucket Dictionary. The spatial hash is required to handle floating point drift. This implementation is confirmed working from V3.
+const float BUCKET_SIZE = 0.05f;
+const float MATCH_DISTANCE = 0.03f;
+const float MATCH_LENGTH_DIFF = 0.05f;
+Dictionary<Vector2Int, List<EdgeSlot>> spatialSlots;
+Vector2Int ToCell(Vector2 midpoint)
+  return new Vector2Int(
+    Mathf.FloorToInt(midpoint.x / BUCKET_SIZE),
+    Mathf.FloorToInt(midpoint.y / BUCKET_SIZE)
+  );
+EdgeSlot FindMatchingSlot(EdgeKey key)
+  Vector2Int cell = ToCell(key.midpoint);
+  for dx in [-1, 0, 1]:
+    for dy in [-1, 0, 1]:
+      search bucket at (cell.x+dx, cell.y+dy)
+      for each slot in bucket:
+        if Distance(slot.midpoint, key.midpoint) < 0.03f
+        && Abs(slot.length - key.length) < 0.05f
+          return slot
+  return null
+4.3 EdgeSlot Structure
+EdgeSlot
+  EdgeKey key          — midpoint + length
+  bool    isOpen       — true = boundary, false = shared
+  Piece   ownerA       — first piece claiming this edge
+  Piece   ownerB       — second piece (set when CLOSED)
+4.4 Key Operations
+void BootstrapFromCluster(List<Piece> pieces)
+  Physics2D.SyncTransforms()  // REQUIRED before reading any socket positions
+  For each piece: read socket world positions
+  For each edge: compute midpoint and length
+  If another piece shares this edge: mark CLOSED
+  Else: add as OPEN
+void RegisterPieceEdges(Piece piece, Vector2[] canonicalVerts)
+  For each edge of piece:
+    existing = FindMatchingSlot(edge)
+    if existing != null and existing.isOpen:
+      existing.isOpen = false
+      existing.ownerB = piece
+    else:
+      add new OPEN slot for this edge
+void UnregisterPiece(Piece piece)
+  Remove all slots where ownerA == piece or ownerB == piece
+  Re-open any CLOSED slots that had this piece as one owner
+4.5 Physics2D.SyncTransforms Requirement
+⚠ Always call Physics2D.SyncTransforms() before reading socket world positions in BootstrapFromCluster. Without this, Unity may return stale transform values for pieces placed before the physics step.
+5. Geometry Snapper
+5.1 Snap Pipeline (Forgiving Mode)
+Sanitize piece rotation to nearest 30° increment on Z axis only
+For each edge of dragged piece: call registry.FindBestMatchingOpenSlot()
+If no slot found: fire OnSnapRejected(NoOpenSlotNearby), return false
+ComputeCandidatePose() — compute target position and rotation
+ProjectAllEdges() — project ALL edges to candidate pose
+FindAllMatchingOpenSlots() — identify expected neighbours
+ConfirmNoBodyIntrusion() — check against non-neighbours only
+If intrusion found: fire OnSnapRejected(BodyOverlap), return false
+Apply position and rotation to piece
+Read canonical vertices BEFORE SetParent
+SetParent to CoreCluster
+RegisterPieceEdges() with canonical vertices
+Fire OnSnapSuccess
+5.2 ComputeCandidatePose — Dual Mapping
+Try both edge direction mappings and pick the one with smaller angular error:
+Mapping A: dragEdge.p1 → slot.p2, dragEdge.p2 → slot.p1
+Mapping B: dragEdge.p2 → slot.p2, dragEdge.p1 → slot.p1
+Pick mapping with smaller angleDiff
+5.3 Mirror Awareness
+When a piece has eulerAngles.x ≈ 180 or eulerAngles.y ≈ 180, it is mirrored. For mirrored pieces, swap p1 and p2 on all edges before registry matching. This preserves the correct edge direction convention regardless of mirror state.
+5.4 Body Intrusion Check
+Only check against non-neighbours. Expected neighbours are pieces that share a CLOSED edge with the incoming piece after registration. Excluding them prevents false rejection when a piece fills a concave pocket touching multiple existing pieces.
+5.5 Canonical Vertices
+⚠ Read canonical vertices BEFORE calling SetParent. If CoreCluster has any transform offset, reparenting shifts socket world positions and the registry stores wrong midpoints.
+// CORRECT order:
+Vector2[] verts = GetCurrentWorldVertices(piece);  // before SetParent
+piece.transform.SetParent(coreCluster.transform);
+registry.RegisterPieceEdges(piece, verts);
+6. Gap Detector
+6.1 Purpose
+Detects enclosed empty regions in the cluster after every snap. An enclosed gap triggers game over.
+6.2 Algorithm
+Collect all OPEN edge midpoints from registry
+Build adjacency graph of open edges by shared vertices
+Find connected components of open edges
+For each component: compute enclosed area using shoelace formula
+If any component area < gap threshold AND component is fully enclosed: game over
+6.3 Gap Area Threshold
+Default: 50% of one kite area, computed from canonical vertices at bootstrap time. Gaps smaller than this are ignored to avoid false positives from floating point imprecision at vertices.
+6.4 Pinch Point Policy
+If the cluster boundary touches itself at exactly one vertex (figure-8 shape), this is NOT game over. Only fully enclosed regions count. GapDetector must handle degree-4 boundary nodes correctly.
+7. Hat Pattern Matcher
+⚠ This section replaces the entire V3 HatPatternMatcher. The V3 implementation had a bypassed isomorphism check and wrong degree sequence. Do not reuse V3 code here.
+7.1 The Hat Monotile — Correct Topology
+The Smith Hat monotile is composed of 8 kites from the [3.4.6.4] Laves tiling. The correct internal adjacency graph has these properties:
+Exactly 8 pieces (nodes)
+Exactly 9 closed internal edges (connections between pieces)
+One CENTER piece with degree 4 (touches 4 other pieces on all its edges)
+Two BRANCH pieces with degree 3
+Three MIDDLE pieces with degree 2
+Two TERMINAL pieces with degree 1
+Sorted degree sequence: [4, 3, 3, 2, 2, 2, 1, 1]
+⚠ The V3 degree sequence [2,3,2,2,2,2,3,2] was WRONG. It described a boundary walk, not the internal adjacency graph. The correct sequence is [4,3,3,2,2,2,1,1].
+7.2 The Degree-4 Center Piece
+The center piece (degree 4) is the kite that is completely surrounded by 4 other kites — all 4 of its edges are shared (CLOSED). This is the starting center kite when the player builds the Hat naturally around the pre-placed piece. The degree-4 piece is identified by finding the node in the matched subgraph with exactly 4 closed edges to other nodes in the same subgraph.
+7.3 Detection Algorithm
+Check CLOSED edge count in registry. If < 9, return early. This is O(1) and prevents unnecessary work.
+Find connected component starting from the newly snapped piece using BFS over CLOSED edges.
+If component size != 8, return no match.
+Count CLOSED edges that are internal to this component (both owners in component). If count != 9, return no match.
+Compute degree of each node (count internal closed edges per piece).
+Sort degrees. If sorted sequence != [4,3,3,2,2,2,1,1], return no match.
+Run isomorphism check against known Hat adjacency graph (Section 7.4).
+If isomorphism passes: identify degree-4 node, compute centroid, compute spawn rotation, return match.
+⚠ Step 4 (internal edge count == 9) is a critical guard against false positives. A symmetric 8-kite flower shape has 10 internal edges and the same degree sequence — it must be rejected here.
+7.4 Hat Adjacency Graph
+The canonical Hat adjacency (0-indexed, where node 0 is the degree-4 center):
+HatAdjacency = [
+  (0,1), (0,2), (0,3), (0,4),   // center touches 4 others
+  (1,2),                          // branch-branch connection
+  (2,5),                          // branch-middle
+  (3,6),                          // branch-middle
+  (4,5),                          // branch-middle
+  (6,7),                          // middle-terminal
+]
+NOTE: This produces degree sequence: node0=4, node1=2, node2=3, node3=2, node4=2, node5=2, node6=3, node7=1. Wait — recount: (0,1),(0,2),(0,3),(0,4),(1,2),(2,5),(3,6),(4,5),(6,7) = 9 edges. Degrees: 0→4, 1→2, 2→3, 3→2, 4→2, 5→2, 6→2, 7→1. Sorted: [4,3,2,2,2,2,2,1]. Adjust adjacency during implementation to match confirmed degree sequence [4,3,3,2,2,2,1,1].
+⚠ The exact adjacency array must be validated against the physical kite layout in Unity before finalising. Build the Hat manually, log all closed edge pairs, and derive the adjacency from real data. Do not trust any adjacency graph that has not been verified against actual gameplay logs.
+7.5 Isomorphism Check
+The isomorphism check verifies that the detected 8-piece subgraph matches the Hat adjacency graph structurally — not just by degree sequence. Use Ullmann's algorithm or VF2 for subgraph isomorphism. The check must NOT be bypassed. If it fails for a valid Hat formation, the adjacency graph in Section 7.4 needs correction, not the check itself.
+7.6 HatMatchResult
+HatMatchResult
+  bool         success
+  List<Piece>  matchedKites       // the 8 matched pieces
+  Piece        degree4Kite        // the center piece (degree 4)
+  Vector2      centroid           // average of all 8 piece positions
+  float        spawnRotation      // degree4Kite.eulerAngles.z + 30f
+  int[]        isomorphismMapping // node index → Piece mapping
+7.7 Spawn Rotation Formula
+Confirmed across 4 orientation tests:
+float spawnRotation = degree4Kite.transform.eulerAngles.z + 30f;
+Center piece Z rotation
+Correct Hat spawn rotation
+90°
+120°
+0°
+30°
+270°
+300° (-60°)
+180°
+210°
+NOTE: The +30f offset is a fixed geometric property of the Hat prefab's default orientation relative to the Laves tiling grid. It does not vary with snap order or position.
+7.8 Spawn Position Formula
+Confirmed correct across all orientations:
+Vector2 centroid = Vector2.zero;
+foreach (Piece p in result.matchedKites)
+  centroid += (Vector2)p.transform.position;
+centroid /= result.matchedKites.Count;
+NOTE: No additional offset required. result.centroid computed this way aligns correctly with the Hat prefab pivot, which is at the geometric center of the Hat mesh.
+7.9 Performance
+TryFindHat is called after every successful snap. Performance is critical.
+Step 1 early exit (CLOSED < 9) fires on almost every snap — O(1)
+BFS in Step 2 visits at most 8 nodes once threshold is passed — O(8)
+Total cost per snap: effectively O(1) regardless of board size
+Never call FindObjectsByType inside TryFindHat — use corePieces list directly
+8. Hat Transition
+8.1 Sequence
+InputManager.SetEnabled(false) — prevent input during transition
+For each piece in result.matchedKites: UnregisterPiece, RemoveFromCorePieces, Destroy
+Instantiate Hat prefab at result.centroid with rotation Euler(0, 0, result.spawnRotation)
+SetParent to CoreCluster.transform
+Physics2D.SyncTransforms()
+Read Hat canonical vertices from its 13 sockets
+RegisterPieceEdges(hatPiece, hatCanonicalVerts)
+AddToCorePieces(hatPiece)
+SwitchToStrictConfig() — activate strict snap mode
+InputManager.SetEnabled(true)
+⚠ Do NOT call enableHatDetection = false in SwitchToStrictConfig. Hat detection must remain active for future Hat formations.
+8.2 Hat Prefab Requirements
+Name: Hat_1
+13 socket child GameObjects defining the outer boundary
+Pivot at geometric center of mesh — confirmed: X range -3.1 to +3.1, Y range -2.25 to +2.25
+Default rotation (0, 0, 0) in prefab
+Has Piece component
+8.3 Registry State After Transition
+After the 8 kites are unregistered and the Hat is registered:
+All 9 internal kite-kite edges: removed
+All outer kite edges that were OPEN: removed and replaced by Hat's 13 OPEN edges
+CLOSED count resets to 0 (or to whatever edges the Hat shares with other existing pieces)
+NOTE: Confirmed from V3 logs: [Registry] After registering Hat_1(Clone): CLOSED = 0
+8.4 CoreCluster Helper Methods
+Add these to CoreCluster.cs for use by GameManager:
+public void RemoveFromCorePieces(Piece p) => corePieces.Remove(p);
+public void AddToCorePieces(Piece p)
+{
+  if (!corePieces.Contains(p)) corePieces.Add(p);
+}
+public void SwitchToStrictConfig()
+{
+  if (strictConfig != null) activeConfig = strictConfig;
+  // Do NOT set enableHatDetection = false here
+}
+9. Core Cluster
+9.1 Fields
+EdgeSlotRegistry        registry
+List<Piece>             corePieces
+SnapConfig              activeConfig
+[SerializeField] SnapConfig  forgivingConfig
+[SerializeField] SnapConfig  strictConfig
+[SerializeField] bool        enableHatDetection  // default true
+[SerializeField] bool        enableGapDetection  // default true
+9.2 Start()
+activeConfig = forgivingConfig
+BootstrapRegistry() — reads center piece sockets, registers 4 OPEN edges
+9.3 TryPlacePiece(Piece piece)
+snapResult = GeometrySnapper.TrySnap(piece, registry, activeConfig)
+If !snapResult.success: return false
+Read canonical verts BEFORE SetParent
+SetParent to CoreCluster.transform
+RegisterPieceEdges with canonical verts
+corePieces.Add(piece)
+If enableGapDetection: GapDetector.Scan(registry) — game over if gap found
+If enableHatDetection: TryFindHat(registry, corePieces, piece)
+Fire OnSnapSuccess
+Return true
+9.4 OnSnapSuccess(Piece piece)
+GameManager.OnPiecePlacedSuccessfully()
+HatMatchResult result = HatPatternMatcher.TryFindHat(registry, corePieces, piece)
+if (result.success) GameManager.OnHatDetected(result)
+10. Game Manager
+10.1 OnHatDetected(HatMatchResult result)
+public void OnHatDetected(HatMatchResult result)
+{
+  InputManager.Instance.SetEnabled(false);
+  foreach (Piece p in result.matchedKites)
+  {
+    CoreCluster.Instance.Registry.UnregisterPiece(p);
+    CoreCluster.Instance.RemoveFromCorePieces(p);
+    Destroy(p.gameObject);
+  }
+  GameObject hatGO = Instantiate(
+    hatPrefab,
+    new Vector3(result.centroid.x, result.centroid.y, 0f),
+    Quaternion.Euler(0f, 0f, result.spawnRotation)
+  );
+  hatGO.transform.SetParent(CoreCluster.Instance.transform);
+  Piece hatPiece = hatGO.GetComponent<Piece>();
+  Physics2D.SyncTransforms();
+  Vector2[] hatVerts = EdgeSlotRegistry.GetCurrentWorldVertices(hatPiece);
+  CoreCluster.Instance.Registry.RegisterPieceEdges(hatPiece, hatVerts);
+  CoreCluster.Instance.AddToCorePieces(hatPiece);
+  CoreCluster.Instance.SwitchToStrictConfig();
+  InputManager.Instance.SetEnabled(true);
+}
+10.2 Inspector Fields
+[SerializeField] GameObject hatPrefab
+[SerializeField] SnapConfig strictSnapConfig
+11. Known V3 Bugs — All Must Be Fixed
+#
+Bug
+Location
+Fix
+1
+Canonical verts read after SetParent
+CoreCluster.TryPlacePiece
+Read verts before SetParent, then register
+2
+Anti-parallel mapping assumes fixed winding
+GeometrySnapper.ComputeCandidatePose
+Try both p1→slot.p2 and p2→slot.p1 mappings, pick smaller angleDiff
+3
+EdgeKey hash too fine
+EdgeSlotRegistry
+Use spatial hash with 0.05f bucket size, 0.03f match distance
+4
+Rejection log gated by emitRejectionEvents
+CoreCluster.TryPlacePiece
+Always log; only fire event when flag is true
+5
+Mirror state ignored in snap math
+GeometrySnapper.GetWorldEdges, ProjectEdgesAtPose
+Detect eulerAngles.x≈180 or y≈180, swap p1/p2 direction
+6
+Hat degree sequence wrong
+HatPatternMatcher
+Use [4,3,3,2,2,2,1,1] not [2,3,2,2,2,2,3,2]
+7
+No internal edge count guard
+HatPatternMatcher
+Require exactly 9 internal closed edges before degree check
+8
+Isomorphism check bypassed
+HatPatternMatcher
+Implement properly — do not bypass
+9
+Hat spawn rotation wrong
+GameManager.OnHatDetected
+Use degree4Kite.eulerAngles.z + 30f
+10
+FindObjectsByType in hot path
+CoreCluster.OnSnapSuccess
+Use corePieces list directly
+11
+enableHatDetection disabled after transition
+CoreCluster.SwitchToStrictConfig
+Remove enableHatDetection = false
+12. Implementation Order
+Build in this exact order. Each step is independently testable before the next begins.
+SnapConfig.cs + ForgivingConfig.asset + StrictConfig.asset
+SnapResult.cs + RejectionReason enum
+EdgeSlotRegistry.cs — spatial hash, Bootstrap, Register, Unregister
+Test EdgeSlotRegistry with 2-piece manual test: confirm CLOSED=1 after second piece
+GeometrySnapper.cs — TrySnap pipeline, dual mapping, mirror awareness
+CoreCluster.cs — BootstrapRegistry, TryPlacePiece with all V3 fixes
+Wire and test: snap 3-4 kites, confirm no NoOpenSlotNearby after piece 2
+GapDetector.cs — test with hand-constructed slot lists
+Wire GapDetector into snap success path
+HatPatternMatcher.cs — implement with correct degree sequence, edge count guard, isomorphism
+Validate Hat adjacency graph against real gameplay logs before finalising
+Wire Hat detection behind enableHatDetection flag
+GameManager.OnHatDetected — full transition sequence
+Test Hat transition in all 4 center piece orientations (0°, 90°, 180°, 270°)
+Playtesting pass — tune thresholds, verify no false positives
+13. Open Questions
+Resolve these by inspecting existing scripts before writing code.
+Hat adjacency graph: The exact adjacency array in Section 7.4 must be validated against real gameplay logs. Build the Hat manually, log all closed edge pairs between the 8 matched kites, and derive the true adjacency from that data.
+Isomorphism algorithm: Confirm VF2 or Ullmann is feasible for an 8-node graph at mobile frame rate. At 8 nodes this should be fast enough, but profile before release.
+Gap area threshold: Confirm 50% of one kite area is the right value. Too small causes false positives at vertices. Too large misses real gaps.
+Hat prefab sockets: Confirm Hat_1 prefab has exactly 13 socket child GameObjects in clockwise order from the bottom-centre vertex.
+Piece.cs interface: Confirm the exact method names for accessing socket positions from Piece.cs before implementing GetCurrentWorldVertices.
+14. Future Versions — Do Not Implement Now
+⚠ The following are noted for V5 only. Do not implement any of this in V4.
+14.1 Generic Polygon System (V5)
+V5 will generalise the system to support any polygon defined by N vertices. The polygon type will be defined by a PolygonConfig ScriptableObject with vertex positions, edge indices, and pattern adjacency data. This will enable Penrose kite+dart, Spectre, and custom tiles without code changes.
+14.2 Hat Mirroring (V5 Hat Scene)
+The Smith Hat requires mirror images (flipped Hats) for infinite aperiodic tiling. Approximately 1 in 7 Hats must be mirrored. Two implementation options: probabilistic spawner (15% chance of mirrored Hat) or double-tap flip mechanic. Do not implement in V4.
+14.3 Penrose Tiles (V5+)
+Penrose P2 tiling uses two polygon types: kite (fat quadrilateral, angles 72-144-72-72) and dart (concave quadrilateral with one reflex angle, angles 36-216-36-72). Both tile edge-to-edge with no overlap. The generic polygon system in V5 will handle both naturally.
+Document Sign-Off
+Version
+V4 — Final
+Status
+All decisions confirmed by project owner
+Replaces
+V3 — which had wrong Hat degree sequence, bypassed isomorphism, wrong spawn rotation formula
+Carries forward from V3
+Spatial hash EdgeSlotRegistry, Physics2D.SyncTransforms requirement, 30° rotation rounding, corePieces maintained list
+⚠ Do not begin implementation until the Hat adjacency graph (Section 7.4) has been validated against real gameplay logs. All other sections are confirmed final.

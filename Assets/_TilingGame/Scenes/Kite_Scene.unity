@@ -327,7 +327,7 @@ MonoBehaviour:
   zoomSpeed: 5
   activeConfig: {fileID: 11400000, guid: ca0521241421d584b8df0525df33302b, type: 2}
   strictConfig: {fileID: 11400000, guid: e43592e64d43f804fbece55e94f2e922, type: 2}
-  enableHatDetection: 1
+  enableHatDetection: 0
   corePieces: []
 --- !u!4 &817515934
 Transform:
@@ -340,7 +340,7 @@ Transform:
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
   m_LocalPosition: {x: 0, y: 0, z: 0}
   m_LocalScale: {x: 1, y: 1, z: 1}
-  m_ConstrainProportionsScale: 0
+  m_ConstrainProportionsScale: 1
   m_Children:
   - {fileID: 861270914}
   m_Father: {fileID: 0}
@@ -799,7 +799,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!212 &1912872961
 SpriteRenderer:
   m_ObjectHideFlags: 0
